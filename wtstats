@@ -1,0 +1,225 @@
+#!/bin/bash
+#
+# Copyright (c) 2021 Carsten Hartenfels
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+#
+
+db="${HOME}/.wtsnap.db"
+classes="${HOME}/.wtclass.sql"
+idle_time=60000
+show_uncategorized=0
+sqlite_options=('-header' '-table')
+
+warn() {
+    echo "$@" 1>&2
+}
+
+make_timestamp() {
+    local local_datetime utc_datetime
+
+    # First local time, so that if you say something like "yesterday" it
+    # actually refers to yesterday in your time zone, not yesterday in UTC.
+    local_datetime="$(date -d "$2" '+%Y-%m-%dT%H:%M:%S.%N%:z')"
+
+    if [[ -n $local_datetime ]]; then
+
+        # And then convert that to UTC for the database.
+        utc_datetime="$(date -ud "$local_datetime" '+%Y-%m-%dT%H:%M:%S.%3NZ')"
+
+        if [[ -n $utc_datetime ]]; then
+            echo "and timestamp $1 '$utc_datetime'"
+        fi
+    fi
+}
+
+error=0
+want_help=0
+
+while getopts 'c:f:hi:q:s:S:t:T:uUw:' arg; do
+    case "$arg" in
+        c)
+            classes="$OPTARG"
+            ;;
+        f)
+            db="$OPTARG"
+            ;;
+        h)
+            want_help=1
+            ;;
+        i)
+            if ! eval 'idle_time="$((OPTARG + 0))"' || [[ $idle_time -eq 0 ]]; then
+                warn "$0: invalid idle time -- '$OPTARG'"
+                error=1
+            fi
+            ;;
+        q)
+            read -ra sqlite_options <<<"$OPTARG"
+            ;;
+        s)
+            datetime_gte="$(make_timestamp '>=' "$OPTARG")"
+            if [[ -z $datetime_gte ]]; then
+                error=1
+            fi
+            ;;
+        S)
+            datetime_gt="$(make_timestamp '>' "$OPTARG")"
+            if [[ -z $datetime_gt ]]; then
+                error=1
+            fi
+            ;;
+        t)
+            datetime_lte="$(make_timestamp '<=' "$OPTARG")"
+            if [[ -z $datetime_lte ]]; then
+                error=1
+            fi
+            ;;
+        T)
+            datetime_lt="$(make_timestamp '<' "$OPTARG")"
+            if [[ -z $datetime_lt ]]; then
+                error=1
+            fi
+            ;;
+        u)
+            show_uncategorized=1
+            ;;
+        U)
+            show_uncategorized=0
+            ;;
+        w)
+            additional_where_conditions="$OPTARG"
+            ;;
+        *)
+            error=1
+            ;;
+    esac
+done
+
+((last_index=OPTIND-1))
+shift "$last_index"
+if [[ $# -gt 0 ]]; then
+    warn 'Trailing arguments:' "$@"
+    error=1
+fi
+
+if [[ $want_help -ne 0 ]]; then
+    cat <<END_OF_HELP
+
+wtstats - queries snapshots previously made with wtsnap, classifying them
+into tasks according to your specifications and telling you how long you
+worked on each of them. Really just convenience around querying the SQLite
+database manually.
+
+Usage: $0 [OPTIONS]
+
+Available options:
+
+    -c SQL_FILE
+        Path to the file containing the classification conditions as the
+        contents of an SQL CASE statement.
+        Default is ~/.wtclass.sql
+
+    -f DATABASE_FILE
+        Path to the SQLite database file.
+        Default is ~/.wtsnap.db
+
+    -h
+        Show this help.
+
+    -i IDLE_TIME_IN_MILLISECONDS
+        Idle time in milliseconds at which to ignore a snapshot.
+        Default is 60000, excluding every snapshot where the last user
+        interaction has been a minute or longer ago.
+
+    -q SQLITE_OPTIONS
+        Options to pass to the sqlite3 command on the command line.
+        Default is '-header -table'.
+
+    -s DATETIME     (for snapshot >= DATETIME)
+    -S DATETIME     (for snapshot >  DATETIME)
+    -t DATETIME     (for snapshot <= DATETIME)
+    -T DATETIME     (for snapshot <  DATETIME)
+        Adds a date condition to the classification query. The argument
+        is something that your date command can parse, for example
+        'today 12 pm', 'March 1' or '2021-01-01'.
+        Default is to have all of these unset.
+
+    -u
+    -U
+        Sets the show_uncategorized variable to 1 (-u) or 0 (-U). This
+        will appear as a column in your classification query. Use it to
+        show uncategorized windows when set to 1.
+        Default is show_categorized being 0.
+
+    -w WHERE_CONDITIONS
+        Specify additional conditions for the WHERE clause in the
+        classification query. Should probably start with AND.
+        Default is ''.
+
+END_OF_HELP
+fi
+
+if [[ $error -ne 0 ]]; then
+    exit 2
+fi
+
+if [[ $want_help -ne 0 ]]; then
+    exit 0
+fi
+
+
+classes_content="$(<"$classes")"
+if [[ -z $classes_content ]]; then
+    warn "Got nothing from classification file '$classes', bailing out"
+    exit 1
+fi
+
+sqlite3 "${sqlite_options[@]}" "$db" <<END_OF_SQL
+with
+    variables as (
+        select $show_uncategorized as show_uncategorized),
+    classified as (
+        select
+            s.snapshot_id, depth,
+            case $classes_content end as class,
+            sample_time as seconds
+        from  snapshot s
+        join  window w on w.snapshot_id = s.snapshot_id
+        cross join variables
+        where idle_time < $idle_time
+        and   focused <> 0
+        and   parent_id is not null
+        $datetime_lt
+        $datetime_lte
+        $datetime_gt
+        $datetime_gte
+        $additional_where_conditions),
+    filtered as (
+        select class, seconds
+        from classified
+        where class is not null
+        group by snapshot_id
+        having depth = max(depth))
+select
+    class,
+    sum(seconds) / 3600 as hours,
+    sum(seconds) % 3600 / 60 as minutes
+from filtered
+group by class
+END_OF_SQL
