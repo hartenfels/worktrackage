@@ -165,7 +165,7 @@ Available options:
         Sets the show_uncategorized variable to 1 (-u) or 0 (-U). This
         will appear as a column in your classification query. Use it to
         show uncategorized windows when set to 1.
-        Default is show_categorized being 0.
+        Default is show_uncategorized being 0.
 
     -w WHERE_CONDITIONS
         Specify additional conditions for the WHERE clause in the
