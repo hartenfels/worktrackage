@@ -673,6 +673,19 @@ static void run(Context *ctx)
     db_commit(ctx);
 }
 
+static bool run_with_jmp_buf(Context *ctx)
+{
+    if (setjmp(ctx->env) == 0) {
+        debug("Running with longjmp buffer");
+        run(ctx);
+        return true;
+    }
+    else {
+        debug("Caught longjmp");
+        return false;
+    }
+}
+
 static void cleanup(Context *ctx)
 {
     debug("Cleaning up");
@@ -765,15 +778,7 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    int result = setjmp(ctx.env);
-    if (result == 0) {
-        debug("Running with longjmp buffer");
-        run(&ctx);
-    }
-    else {
-        debug("Caught longjmp %d", result);
-    }
-
+    bool ok = run_with_jmp_buf(&ctx);
     cleanup(&ctx);
-    return result;
+    return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }
